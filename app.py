@@ -63,21 +63,23 @@ HTML_TEMPLATE = """
 """
 
 def remove_text_from_pdf(input_pdf, output_pdf):
-    """შექმნის ახალ PDF-ს, სადაც ყოველი გვერდი სურათად იქნება (ტექსტის გარეშე)."""
+    """შექმნის PDF-ს, სადაც გვერდები მხოლოდ სურათებად არის, საერთოდ არ აქვს ტექსტური ობიექტები."""
     doc = fitz.open(input_pdf)
     new_doc = fitz.open()
 
     for page in doc:
-        # გვერდი გადაიქცევა სურათად (მაღალი ხარისხი)
-        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+        # მაღალი ხარისხის გამოსახულება (300 DPI ეკვივალენტი)
+        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
         img_bytes = pix.tobytes("png")
 
-        # ახალი გვერდი PDF-ში
         rect = fitz.Rect(0, 0, pix.width, pix.height)
         new_page = new_doc.new_page(width=pix.width, height=pix.height)
+
+        # ვამატებთ მხოლოდ სურათს, სხვა არაფერი
         new_page.insert_image(rect, stream=img_bytes)
 
-    new_doc.save(output_pdf)
+    # ვასუფთავებთ ყველაფერს, რომ PDF-ში ძველი ობიექტები არ დარჩეს
+    new_doc.save(output_pdf, garbage=4, deflate=True, clean=True)
     new_doc.close()
 
 @app.route("/", methods=["GET", "POST"])
