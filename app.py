@@ -43,7 +43,7 @@ HTML_TEMPLATE = """
 
   {% if images %}
     <div class="card">
-      <h3>📷 ამოღებული სურათები</h3>
+      <h3>📷 სურათები</h3>
       <ul>
       {% for img in images %}
         <li><a href="{{ img }}">სურათი {{ loop.index }}</a></li>
@@ -51,14 +51,30 @@ HTML_TEMPLATE = """
       </ul>
     </div>
   {% endif %}
+
+  {% if no_text_pdf %}
+    <div class="card">
+      <h3>🧹 ტექსტის გარეშე PDF</h3>
+      <p><a href="{{ no_text_pdf }}">ჩამოტვირთე PDF ტექსტის გარეშე</a></p>
+    </div>
+  {% endif %}
 </body>
 </html>
 """
+
+def remove_text_from_pdf(input_pdf, output_pdf):
+    doc = fitz.open(input_pdf)
+    for page in doc:
+        page.clean_contents()   # გაწმენდის შიდა სტრუქტურას
+        page.delete_text()      # წაშლის მხოლოდ ტექსტურ ობიექტებს
+    doc.save(output_pdf)
 
 @app.route("/", methods=["GET", "POST"])
 def index():
     text_file = None
     images = []
+    no_text_pdf = None
+
     if request.method == "POST":
         file = request.files.get("pdf_file")
         if file:
@@ -66,9 +82,8 @@ def index():
             filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
             file.save(filepath)
 
-            # გახსნა PDF
-            doc = fitz.open(filepath)
             base_no_ext = os.path.splitext(filename)[0]
+            doc = fitz.open(filepath)
 
             # ტექსტის ამოღება
             text_output_name = f"{base_no_ext}_text.txt"
@@ -80,7 +95,7 @@ def index():
                     f.write("\n\n")
             text_file = f"/outputs/{text_output_name}"
 
-            # ჩაშენებული სურათების ამოღება
+            # სურათების ამოღება (embed-ები)
             for page_index, page in enumerate(doc):
                 for img_index, img in enumerate(page.get_images(full=True)):
                     xref = img[0]
@@ -97,16 +112,13 @@ def index():
                     pix = None
                     images.append(f"/outputs/{img_filename}")
 
-            # თუ embed სურათი საერთოდ არ არის → მთლიანი გვერდის snapshot PNG-ად
-            if not images:
-                for page_index, page in enumerate(doc):
-                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x resolution
-                    img_filename = f"{base_no_ext}_page{page_index+1}.png"
-                    img_path = os.path.join(app.config["OUTPUT_FOLDER"], img_filename)
-                    pix.save(img_path)
-                    images.append(f"/outputs/{img_filename}")
+            # ტექსტის მოშლილი PDF
+            no_text_pdf_name = f"{base_no_ext}_no_text.pdf"
+            no_text_pdf_path = os.path.join(app.config["OUTPUT_FOLDER"], no_text_pdf_name)
+            remove_text_from_pdf(filepath, no_text_pdf_path)
+            no_text_pdf = f"/outputs/{no_text_pdf_name}"
 
-    return render_template_string(HTML_TEMPLATE, text_file=text_file, images=images)
+    return render_template_string(HTML_TEMPLATE, text_file=text_file, images=images, no_text_pdf=no_text_pdf)
 
 @app.route("/outputs/<path:filename>")
 def download_output(filename):
