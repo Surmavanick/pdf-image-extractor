@@ -30,44 +30,46 @@ HTML_TEMPLATE = """
   <div class="card">
     <form method="post" enctype="multipart/form-data">
       <input type="file" name="pdf_file" accept="application/pdf" required>
-      <button class="btn" type="submit">გაწმენდა</button>
+      <button class="btn" type="submit">ტექსტის წაშლა</button>
     </form>
   </div>
 
   {% if cleaned_pdf %}
     <div class="card">
-      <h3>🧹 გაწმენდილი PDF</h3>
-      <p><a href="{{ cleaned_pdf }}">ჩამოტვირთე გაწმენდილი ECG PDF</a></p>
+      <h3>🧹 PDF ტექსტის გარეშე</h3>
+      <p><a href="{{ cleaned_pdf }}">ჩამოტვირთე გაწმენდილი PDF</a></p>
     </div>
   {% endif %}
 </body>
 </html>
 """
 
-def pdf_to_images_only(input_pdf, output_pdf, dpi=300):
+def remove_text_from_pdf(input_pdf, output_pdf):
     """
-    გარდაქმნის PDF გვერდებს სურათებად და ქმნის ახალ PDF-ს მხოლოდ სურათებით.
-    არ რჩება ტექსტური ფენა, არც დამალული ტექსტი, არც metadata.
+    პოულობს და შლის ტექსტს PDF-დან redaction-ის გამოყენებით.
+    ინარჩუნებს სხვა გრაფიკულ ელემენტებს.
     """
     doc = fitz.open(input_pdf)
-    new_doc = fitz.open()
-
-    zoom = dpi / 72
-    mat = fitz.Matrix(zoom, zoom)
 
     for page in doc:
-        pix = page.get_pixmap(matrix=mat, alpha=False)
-        img_bytes = pix.tobytes("png")
+        # ვიპოვოთ გვერდზე ყველა სიტყვა და მათი კოორდინატები
+        words = page.get_text("words")
+        if not words:
+            continue
 
-        rect = fitz.Rect(0, 0, pix.width, pix.height)
-        new_page = new_doc.new_page(width=pix.width, height=pix.height)
-        new_page.insert_image(rect, stream=img_bytes)
+        # თითოეული სიტყვისთვის დავამატოთ redaction (წაშლის) მონიშვნა
+        for word in words:
+            # word[:4] არის სიტყვის კოორდინატები (მართკუთხედი)
+            rect = fitz.Rect(word[:4])
+            page.add_redact_annot(rect, fill=(1, 1, 1)) # fill=(1,1,1) თეთრი ფერით ავსებს
 
-    # Metadata წავშალოთ
-    new_doc.set_metadata({})
-    # Deflate + garbage cleanup ensures no text leftovers
-    new_doc.save(output_pdf, deflate=True, garbage=4, clean=True)
-    new_doc.close()
+        # გამოვიყენოთ ყველა მონიშვნა, რაც საბოლოოდ შლის ტექსტს
+        page.apply_redactions()
+
+    # შევინახოთ გაწმენდილი დოკუმენტი
+    doc.save(output_pdf, garbage=4, deflate=True, clean=True)
+    doc.close()
+
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -81,18 +83,20 @@ def index():
             file.save(filepath)
 
             base_no_ext = os.path.splitext(filename)[0]
-            cleaned_pdf_name = f"{base_no_ext}_cleaned.pdf"
+            cleaned_pdf_name = f"{base_no_ext}_no_text.pdf"
             cleaned_pdf_path = os.path.join(app.config["OUTPUT_FOLDER"], cleaned_pdf_name)
 
-            # გაწმენდა
-            pdf_to_images_only(filepath, cleaned_pdf_path, dpi=300)
+            # ტექსტის წაშლის ახალი ფუნქციის გამოყენება
+            remove_text_from_pdf(filepath, cleaned_pdf_path)
             cleaned_pdf = f"/outputs/{cleaned_pdf_name}"
 
     return render_template_string(HTML_TEMPLATE, cleaned_pdf=cleaned_pdf)
 
+
 @app.route("/outputs/<path:filename>")
 def download_output(filename):
     return send_file(os.path.join(app.config["OUTPUT_FOLDER"], filename), as_attachment=True)
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
