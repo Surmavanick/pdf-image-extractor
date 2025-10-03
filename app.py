@@ -63,11 +63,22 @@ HTML_TEMPLATE = """
 """
 
 def remove_text_from_pdf(input_pdf, output_pdf):
+    """შექმნის ახალ PDF-ს, სადაც ყოველი გვერდი სურათად იქნება (ტექსტის გარეშე)."""
     doc = fitz.open(input_pdf)
+    new_doc = fitz.open()
+
     for page in doc:
-        page.clean_contents()   # გაწმენდის შიდა სტრუქტურას
-        page.delete_text()      # წაშლის მხოლოდ ტექსტურ ობიექტებს
-    doc.save(output_pdf)
+        # გვერდი გადაიქცევა სურათად (მაღალი ხარისხი)
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+        img_bytes = pix.tobytes("png")
+
+        # ახალი გვერდი PDF-ში
+        rect = fitz.Rect(0, 0, pix.width, pix.height)
+        new_page = new_doc.new_page(width=pix.width, height=pix.height)
+        new_page.insert_image(rect, stream=img_bytes)
+
+    new_doc.save(output_pdf)
+    new_doc.close()
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -85,7 +96,7 @@ def index():
             base_no_ext = os.path.splitext(filename)[0]
             doc = fitz.open(filepath)
 
-            # ტექსტის ამოღება
+            # ტექსტის ამოღება TXT-ში
             text_output_name = f"{base_no_ext}_text.txt"
             text_output_path = os.path.join(app.config["OUTPUT_FOLDER"], text_output_name)
             with open(text_output_path, "w", encoding="utf-8") as f:
@@ -95,7 +106,7 @@ def index():
                     f.write("\n\n")
             text_file = f"/outputs/{text_output_name}"
 
-            # სურათების ამოღება (embed-ები)
+            # ჩაშენებული სურათების ამოღება
             for page_index, page in enumerate(doc):
                 for img_index, img in enumerate(page.get_images(full=True)):
                     xref = img[0]
@@ -103,16 +114,16 @@ def index():
                     img_filename = f"{base_no_ext}_p{page_index+1}_{img_index+1}.png"
                     img_path = os.path.join(app.config["OUTPUT_FOLDER"], img_filename)
 
-                    if pix.n < 5:  # RGB ან GRAY
+                    if pix.n < 5:
                         pix.save(img_path)
-                    else:  # CMYK → RGB
+                    else:
                         pix1 = fitz.Pixmap(fitz.csRGB, pix)
                         pix1.save(img_path)
                         pix1 = None
                     pix = None
                     images.append(f"/outputs/{img_filename}")
 
-            # ტექსტის მოშლილი PDF
+            # ტექსტის გარეშე PDF
             no_text_pdf_name = f"{base_no_ext}_no_text.pdf"
             no_text_pdf_path = os.path.join(app.config["OUTPUT_FOLDER"], no_text_pdf_name)
             remove_text_from_pdf(filepath, no_text_pdf_path)
