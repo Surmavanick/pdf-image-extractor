@@ -18,7 +18,7 @@ HTML_TEMPLATE = """
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>PDF Extractor</title>
+  <title>ECG PDF Cleaner</title>
   <style>
     body { font-family: sans-serif; padding: 24px; max-width: 900px; margin: auto; }
     .btn { padding: 8px 14px; border: 1px solid #ddd; background: #f7f7f7; cursor: pointer; border-radius: 8px; }
@@ -26,67 +26,49 @@ HTML_TEMPLATE = """
   </style>
 </head>
 <body>
-  <h2>ატვირთე PDF</h2>
+  <h2>ატვირთე ECG PDF</h2>
   <div class="card">
     <form method="post" enctype="multipart/form-data">
       <input type="file" name="pdf_file" accept="application/pdf" required>
-      <button class="btn" type="submit">ამოღება</button>
+      <button class="btn" type="submit">გაწმენდა</button>
     </form>
   </div>
 
-  {% if text_file %}
+  {% if cleaned_pdf %}
     <div class="card">
-      <h3>📄 ტექსტი</h3>
-      <p><a href="{{ text_file }}">ჩამოტვირთე ტექსტი (TXT)</a></p>
-    </div>
-  {% endif %}
-
-  {% if images %}
-    <div class="card">
-      <h3>📷 სურათები</h3>
-      <ul>
-      {% for img in images %}
-        <li><a href="{{ img }}">სურათი {{ loop.index }}</a></li>
-      {% endfor %}
-      </ul>
-    </div>
-  {% endif %}
-
-  {% if no_text_pdf %}
-    <div class="card">
-      <h3>🧹 ტექსტის გარეშე PDF</h3>
-      <p><a href="{{ no_text_pdf }}">ჩამოტვირთე PDF ტექსტის გარეშე</a></p>
+      <h3>🧹 გაწმენდილი PDF</h3>
+      <p><a href="{{ cleaned_pdf }}">ჩამოტვირთე გაწმენდილი ECG PDF</a></p>
     </div>
   {% endif %}
 </body>
 </html>
 """
 
-def remove_text_from_pdf(input_pdf, output_pdf):
-    """შექმნის PDF-ს, სადაც გვერდები მხოლოდ სურათებად არის, საერთოდ არ აქვს ტექსტური ობიექტები."""
+def pdf_to_images_only(input_pdf, output_pdf, dpi=300):
+    """Convert each page into image-only PDF (no text, no hidden objects)."""
     doc = fitz.open(input_pdf)
     new_doc = fitz.open()
 
+    zoom = dpi / 72  # scale factor (72 is default PDF DPI)
+    mat = fitz.Matrix(zoom, zoom)
+
     for page in doc:
-        # მაღალი ხარისხის გამოსახულება (300 DPI ეკვივალენტი)
-        pix = page.get_pixmap(matrix=fitz.Matrix(3, 3))
+        # გვერდის რენდერინგი სურათად
+        pix = page.get_pixmap(matrix=mat, alpha=False)
         img_bytes = pix.tobytes("png")
 
+        # ახალი PDF გვერდი მხოლოდ ამ სურათით
         rect = fitz.Rect(0, 0, pix.width, pix.height)
         new_page = new_doc.new_page(width=pix.width, height=pix.height)
-
-        # ვამატებთ მხოლოდ სურათს, სხვა არაფერი
         new_page.insert_image(rect, stream=img_bytes)
 
-    # ვასუფთავებთ ყველაფერს, რომ PDF-ში ძველი ობიექტები არ დარჩეს
-    new_doc.save(output_pdf, garbage=4, deflate=True, clean=True)
+    # საბოლოო შენახვა
+    new_doc.save(output_pdf, deflate=True, garbage=4, clean=True)
     new_doc.close()
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    text_file = None
-    images = []
-    no_text_pdf = None
+    cleaned_pdf = None
 
     if request.method == "POST":
         file = request.files.get("pdf_file")
@@ -96,42 +78,13 @@ def index():
             file.save(filepath)
 
             base_no_ext = os.path.splitext(filename)[0]
-            doc = fitz.open(filepath)
+            cleaned_pdf_name = f"{base_no_ext}_cleaned.pdf"
+            cleaned_pdf_path = os.path.join(app.config["OUTPUT_FOLDER"], cleaned_pdf_name)
 
-            # ტექსტის ამოღება TXT-ში
-            text_output_name = f"{base_no_ext}_text.txt"
-            text_output_path = os.path.join(app.config["OUTPUT_FOLDER"], text_output_name)
-            with open(text_output_path, "w", encoding="utf-8") as f:
-                for i, page in enumerate(doc):
-                    f.write(f"--- Page {i+1} ---\n")
-                    f.write(page.get_text("text"))
-                    f.write("\n\n")
-            text_file = f"/outputs/{text_output_name}"
+            pdf_to_images_only(filepath, cleaned_pdf_path, dpi=300)
+            cleaned_pdf = f"/outputs/{cleaned_pdf_name}"
 
-            # ჩაშენებული სურათების ამოღება
-            for page_index, page in enumerate(doc):
-                for img_index, img in enumerate(page.get_images(full=True)):
-                    xref = img[0]
-                    pix = fitz.Pixmap(doc, xref)
-                    img_filename = f"{base_no_ext}_p{page_index+1}_{img_index+1}.png"
-                    img_path = os.path.join(app.config["OUTPUT_FOLDER"], img_filename)
-
-                    if pix.n < 5:
-                        pix.save(img_path)
-                    else:
-                        pix1 = fitz.Pixmap(fitz.csRGB, pix)
-                        pix1.save(img_path)
-                        pix1 = None
-                    pix = None
-                    images.append(f"/outputs/{img_filename}")
-
-            # ტექსტის გარეშე PDF
-            no_text_pdf_name = f"{base_no_ext}_no_text.pdf"
-            no_text_pdf_path = os.path.join(app.config["OUTPUT_FOLDER"], no_text_pdf_name)
-            remove_text_from_pdf(filepath, no_text_pdf_path)
-            no_text_pdf = f"/outputs/{no_text_pdf_name}"
-
-    return render_template_string(HTML_TEMPLATE, text_file=text_file, images=images, no_text_pdf=no_text_pdf)
+    return render_template_string(HTML_TEMPLATE, cleaned_pdf=cleaned_pdf)
 
 @app.route("/outputs/<path:filename>")
 def download_output(filename):
