@@ -45,24 +45,27 @@ HTML_TEMPLATE = """
 """
 
 def pdf_to_images_only(input_pdf, output_pdf, dpi=300):
-    """Convert each page into image-only PDF (no text, no hidden objects)."""
+    """
+    გარდაქმნის PDF გვერდებს სურათებად და ქმნის ახალ PDF-ს მხოლოდ სურათებით.
+    არ რჩება ტექსტური ფენა, არც დამალული ტექსტი, არც metadata.
+    """
     doc = fitz.open(input_pdf)
     new_doc = fitz.open()
 
-    zoom = dpi / 72  # scale factor (72 is default PDF DPI)
+    zoom = dpi / 72
     mat = fitz.Matrix(zoom, zoom)
 
     for page in doc:
-        # გვერდის რენდერინგი სურათად
         pix = page.get_pixmap(matrix=mat, alpha=False)
         img_bytes = pix.tobytes("png")
 
-        # ახალი PDF გვერდი მხოლოდ ამ სურათით
         rect = fitz.Rect(0, 0, pix.width, pix.height)
         new_page = new_doc.new_page(width=pix.width, height=pix.height)
         new_page.insert_image(rect, stream=img_bytes)
 
-    # საბოლოო შენახვა
+    # Metadata წავშალოთ
+    new_doc.set_metadata({})
+    # Deflate + garbage cleanup ensures no text leftovers
     new_doc.save(output_pdf, deflate=True, garbage=4, clean=True)
     new_doc.close()
 
@@ -81,6 +84,7 @@ def index():
             cleaned_pdf_name = f"{base_no_ext}_cleaned.pdf"
             cleaned_pdf_path = os.path.join(app.config["OUTPUT_FOLDER"], cleaned_pdf_name)
 
+            # გაწმენდა
             pdf_to_images_only(filepath, cleaned_pdf_path, dpi=300)
             cleaned_pdf = f"/outputs/{cleaned_pdf_name}"
 
