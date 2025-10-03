@@ -52,21 +52,18 @@ def remove_text_from_pdf(input_pdf, output_pdf):
     doc = fitz.open(input_pdf)
 
     for page in doc:
-        # ვიპოვოთ გვერდზე ყველა სიტყვა და მათი კოორდინატები
         words = page.get_text("words")
         if not words:
             continue
 
-        # თითოეული სიტყვისთვის დავამატოთ redaction (წაშლის) მონიშვნა
         for word in words:
-            # word[:4] არის სიტყვის კოორდინატები (მართკუთხედი)
             rect = fitz.Rect(word[:4])
-            page.add_redact_annot(rect, fill=(1, 1, 1)) # fill=(1,1,1) თეთრი ფერით ავსებს
+            # *** მთავარი ცვლილება აქ არის ***
+            # fill=None ნიშნავს, რომ წაშლილი ტექსტის ადგილას ფერი არ დაედება (გამჭვირვალე იქნება)
+            page.add_redact_annot(rect, fill=None)
 
-        # გამოვიყენოთ ყველა მონიშვნა, რაც საბოლოოდ შლის ტექსტს
         page.apply_redactions()
 
-    # შევინახოთ გაწმენდილი დოკუმენტი
     doc.save(output_pdf, garbage=4, deflate=True, clean=True)
     doc.close()
 
@@ -86,7 +83,6 @@ def index():
             cleaned_pdf_name = f"{base_no_ext}_no_text.pdf"
             cleaned_pdf_path = os.path.join(app.config["OUTPUT_FOLDER"], cleaned_pdf_name)
 
-            # ტექსტის წაშლის ახალი ფუნქციის გამოყენება
             remove_text_from_pdf(filepath, cleaned_pdf_path)
             cleaned_pdf = f"/outputs/{cleaned_pdf_name}"
 
