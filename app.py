@@ -83,55 +83,67 @@ def remove_text_from_pdf(input_pdf, output_pdf):
     doc.save(output_pdf, garbage=4, deflate=True, clean=True)
     doc.close()
 
-def segment_vector_ecg_by_extraction(input_pdf, output_dir):
+def segment_ecg_from_original(original_pdf_path, output_dir):
     """
-    Splits the ECG by extracting dark-colored vector paths.
+    Finds ECG traces in the ORIGINAL PDF by filtering black paths by complexity.
     """
     logs = []
     os.makedirs(output_dir, exist_ok=True)
     
-    # ზღვარი, რომლის ქვემოთაც ფერი ითვლება "მუქად"
-    # R+G+B ჯამი. თეთრი = 3.0, შავი = 0.0.
-    DARKNESS_THRESHOLD = 2.0 
-    logs.append(f"სეგმენტაციის დაწყება: ვეძებთ მუქ ხაზებს (R+G+B < {DARKNESS_THRESHOLD})")
+    TARGET_COLOR = (0, 0, 0)
+    COLOR_TOLERANCE = 0.1
+    # ეკგ-ს ხაზი უნდა შედგებოდეს მინიმუმ ამდენი სეგმენტისგან, რომ ტექსტისგან გავარჩიოთ
+    PATH_COMPLEXITY_THRESHOLD = 15 
     
-    doc = fitz.open(input_pdf)
+    logs.append(f"სეგმენტაციის დაწყება ორიგინალ PDF-ზე.")
+    logs.append(f"ვფილტრავთ შავ ხაზებს (Color ~ {TARGET_COLOR}) სირთულის მიხედვით (> {PATH_COMPLEXITY_THRESHOLD} სეგმენტი).")
+    
+    doc = fitz.open(original_pdf_path)
     if not doc or doc.page_count == 0:
-        logs.append("შეცდომა: გასუფთავებული PDF ფაილი ცარიელია ან ვერ გაიხსნა.")
+        logs.append("შეცდომა: PDF ფაილი ცარიელია ან ვერ გაიხსნა.")
         return [], "\n".join(logs)
     page = doc[0]
     
     drawings = page.get_drawings()
-    logs.append(f"გასუფთავებულ PDF-ში ნაპოვნია {len(drawings)} ვექტორული ობიექტი.")
+    logs.append(f"ორიგინალ PDF-ში ნაპოვნია {len(drawings)} ვექტორული ობიექტი.")
     
-    ecg_paths = []
+    black_paths = []
     for path in drawings:
         if path.get("stroke_color") and path.get("type") == "s":
             color = path["stroke_color"]
-            if sum(color) < DARKNESS_THRESHOLD:
-                y_coords = [p.y for item in path["items"] for p in item[1:] if isinstance(p, fitz.Point)]
-                if y_coords:
-                    avg_y = sum(y_coords) / len(y_coords)
-                    ecg_paths.append({"path": path, "avg_y": avg_y, "color": color})
+            if (abs(color[0] - TARGET_COLOR[0]) < COLOR_TOLERANCE and
+                abs(color[1] - TARGET_COLOR[1]) < COLOR_TOLERANCE and
+                abs(color[2] - TARGET_COLOR[2]) < COLOR_TOLERANCE):
+                black_paths.append(path)
 
-    logs.append(f"ნაპოვნია {len(ecg_paths)} მუქი ფერის ხაზის სეგმენტი.")
+    logs.append(f"ნაპოვნია {len(black_paths)} შავი ფერის ვექტორული ხაზი (ტექსტი + ეკგ).")
+
+    ecg_paths = []
+    for path in black_paths:
+        # ვფილტრავთ სირთულის მიხედვით: ეკგ-ს ხაზს ბევრი სეგმენტი აქვს
+        if len(path.get("items", [])) > PATH_COMPLEXITY_THRESHOLD:
+            y_coords = [p.y for item in path["items"] for p in item[1:] if isinstance(p, fitz.Point)]
+            if y_coords:
+                avg_y = sum(y_coords) / len(y_coords)
+                ecg_paths.append({"path": path, "avg_y": avg_y, "color": TARGET_COLOR})
+
+    logs.append(f"სირთულის ფილტრის შემდეგ დარჩა {len(ecg_paths)} სავარაუდო ეკგ-ს ხაზი.")
     if not ecg_paths:
         doc.close()
         return [], "\n".join(logs)
 
     ecg_paths.sort(key=lambda p: p["avg_y"])
-    
     groups = []
     if ecg_paths:
         current_group = [ecg_paths[0]]
         for i in range(1, len(ecg_paths)):
-            if ecg_paths[i]["avg_y"] - ecg_paths[i-1]["avg_y"] > 20: 
+            if abs(ecg_paths[i]["avg_y"] - ecg_paths[i-1]["avg_y"]) > 20: 
                 groups.append(current_group)
                 current_group = []
             current_group.append(ecg_paths[i])
         groups.append(current_group)
     
-    logs.append(f"მუქი ხაზები დაჯგუფდა {len(groups)} სექტორად.")
+    logs.append(f"ეკგ-ს ხაზები დაჯგუფდა {len(groups)} სექტორად.")
     
     segment_files_info = []
     leads = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6", "Rhythm_Strip"]
@@ -140,10 +152,6 @@ def segment_vector_ecg_by_extraction(input_pdf, output_dir):
         if i >= len(leads): break
         lead_name = leads[i]
         
-        # ვიპოვოთ ამ ჯგუფის დომინანტი ფერი, რომ იმ ფერით დავხატოთ
-        group_colors = [p['color'] for p in group]
-        dominant_color = max(set(group_colors), key=group_colors.count) if group_colors else (0,0,0)
-
         all_points = [p for p_info in group for item in p_info["path"]["items"] for p in item[1:] if isinstance(p, fitz.Point)]
         if not all_points: continue
 
@@ -159,9 +167,9 @@ def segment_vector_ecg_by_extraction(input_pdf, output_dir):
             for item in path_info["path"]["items"]:
                 offset = fitz.Point(min_x - padding, min_y - padding)
                 if item[0] == "l":
-                    new_page.draw_line(item[1] - offset, item[2] - offset, color=dominant_color)
+                    new_page.draw_line(item[1] - offset, item[2] - offset, color=TARGET_COLOR)
                 elif item[0] == "c":
-                    new_page.draw_bezier(item[1] - offset, item[2] - offset, item[3] - offset, item[4] - offset, color=dominant_color)
+                    new_page.draw_bezier(item[1] - offset, item[2] - offset, item[3] - offset, item[4] - offset, color=TARGET_COLOR)
 
         relative_path = os.path.join(os.path.basename(output_dir), f"{lead_name}.pdf")
         full_path = os.path.join(output_dir, f"{lead_name}.pdf")
@@ -188,16 +196,15 @@ def index():
             file.save(filepath)
             base_no_ext = os.path.splitext(filename)[0]
             
-            # ნაბიჯი 1: ტექსტის მოშორება
+            # ვქმნით ტექსტის გარეშე PDF-ს, როგორც დამატებით ფუნქციას
             cleaned_pdf_name = f"{base_no_ext}_no_text.pdf"
             cleaned_pdf_path = os.path.join(app.config["OUTPUT_FOLDER"], cleaned_pdf_name)
             remove_text_from_pdf(filepath, cleaned_pdf_path)
-            
             result_data['cleaned_pdf_url'] = f"/outputs/{cleaned_pdf_name}"
 
-            # ნაბიჯი 2: სეგმენტაცია გასუფთავებულ ფაილზე
+            # სეგმენტაციისთვის ვიყენებთ ორიგინალ ფაილს!
             segment_output_dir = os.path.join(app.config["SEGMENT_FOLDER"], base_no_ext)
-            segments, logs = segment_vector_ecg_by_extraction(cleaned_pdf_path, segment_output_dir)
+            segments, logs = segment_ecg_from_original(filepath, segment_output_dir)
             
             result_data['segments'] = segments
             result_data['logs'] = logs
