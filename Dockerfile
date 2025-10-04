@@ -1,5 +1,3 @@
-# Dockerfile
-
 # ვიყენებთ Python-ის ოფიციალურ, მცირე ზომის ვერსიას
 FROM python:3.10-slim
 
