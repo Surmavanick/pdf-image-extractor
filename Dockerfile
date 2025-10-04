@@ -1,26 +1,22 @@
-# ვიყენებთ Python-ის ოფიციალურ, მცირე ზომის ვერსიას
-FROM python:3.10-slim
+# Use official lightweight Python image
+FROM python:3.11-slim
 
-# ვუთითებთ სამუშაო საქაღალდეს კონტეინერის შიგნით
-WORKDIR /app
-
-# ვანახლებთ პაკეტების სიას და ვაყენებთ poppler-utils-ს.
-# ეს არის კრიტიკული ნაბიჯი PDF-ის კონვერტაციისთვის.
+# Install system dependencies (incl. poppler-utils)
 RUN apt-get update && \
-    apt-get install -y poppler-utils && \
+    apt-get install -y --no-install-recommends poppler-utils && \
     rm -rf /var/lib/apt/lists/*
 
-# ვაკოპირებთ დამოკიდებულებების ფაილს და ვაყენებთ მათ
-COPY requirements.txt .
+# Set work directory
+WORKDIR /app
+
+# Copy project files
+COPY . /app
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ვაკოპირებთ პროექტის დანარჩენ ფაილებს
-COPY . .
+# Expose port
+EXPOSE 5000
 
-# Render-ი დინამიურად გვაწვდის PORT ცვლადს. Gunicorn-ი ამ პორტზე გაეშვება.
-# EXPOSE ეუბნება Docker-ს, რომ კონტეინერი ამ პორტს უსმენს.
-EXPOSE 10000
-
-# ბრძანება, რომელიც გაუშვებს აპლიკაციას Render-ზე
-# Gunicorn-ი უშვებს app ობიექტს app.py ფაილიდან
-CMD ["gunicorn", "--workers", "2", "--bind", "0.0.0.0:10000", "app:app"]
+# Start the app
+CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:5000"]
