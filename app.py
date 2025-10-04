@@ -21,12 +21,12 @@ HTML_TEMPLATE = """
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>ECG PDF Vector Segmenter</title>
+  <title>ECG Vector Segmenter (Adaptive)</title>
   <style>
     body { font-family: sans-serif; padding: 24px; max-width: 900px; margin: auto; }
     .btn { padding: 8px 14px; border: 1px solid #ddd; background: #f7f7f7; cursor: pointer; border-radius: 8px; }
     .card { border: 1px solid #eee; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
-    ul { line-height: 1.8; }
+    pre { background: #fafafa; border: 1px solid #eee; padding: 10px; border-radius: 8px; }
   </style>
 </head>
 <body>
@@ -34,14 +34,14 @@ HTML_TEMPLATE = """
   <div class="card">
     <form method="post" enctype="multipart/form-data">
       <input type="file" name="pdf_file" accept="application/pdf" required>
-      <button class="btn" type="submit">გაწმენდა და ვექტორული სეგმენტაცია</button>
+      <button class="btn" type="submit">გაწმენდა და ადაპტური სეგმენტაცია</button>
     </form>
   </div>
 
   {% if cleaned_pdf %}
     <div class="card">
       <h3>🧹 ტექსტის გარეშე PDF</h3>
-      <p><a href="{{ cleaned_pdf }}" download>ჩამოტვირთე გაწმენდილი ფაილი</a></p>
+      <p><a href="{{ cleaned_pdf }}" download>ჩამოტვირთე გაწმენდილი PDF</a></p>
     </div>
   {% endif %}
 
@@ -58,7 +58,7 @@ HTML_TEMPLATE = """
 
   {% if logs %}
     <div class="card">
-      <h3>ლოგები</h3>
+      <h3>📜 ლოგები</h3>
       <pre>{{ logs }}</pre>
     </div>
   {% endif %}
@@ -66,56 +66,54 @@ HTML_TEMPLATE = """
 </html>
 """
 
-
-# --- Remove text but keep vector graphics intact ---
+# -------- TEXT REMOVAL (vector safe) --------
 def remove_text_from_pdf(input_pdf, output_pdf):
     doc = fitz.open(input_pdf)
     for page in doc:
         words = page.get_text("words")
         for w in words:
-            r = fitz.Rect(w[:4])
-            page.add_redact_annot(r, fill=None)
+            rect = fitz.Rect(w[:4])
+            page.add_redact_annot(rect, fill=None)
         page.apply_redactions()
     doc.set_metadata({})
     doc.save(output_pdf, clean=True, deflate=True, garbage=4)
     doc.close()
 
-
-# --- Segment ECG vector paths dynamically (based on drawing objects) ---
-def vector_segment_by_paths(input_pdf, output_dir, logs):
-    os.makedirs(output_dir, exist_ok=True)
-    doc = fitz.open(input_pdf)
+# -------- ADAPTIVE SEGMENTATION (vector) --------
+def adaptive_vector_segmentation(pdf_path, out_dir, logs, padding=15):
+    os.makedirs(out_dir, exist_ok=True)
+    doc = fitz.open(pdf_path)
     page = doc[0]
 
     drawings = page.get_drawings()
-    logs.append(f"მოიძებნა {len(drawings)} drawing ობიექტი")
+    logs.append(f"დოკუმენტში მოიძებნა {len(drawings)} drawing ობიექტი")
 
-    # ECG-ის ხაზები გრძელია და ვიწრო — დავფილტროთ
+    # ECG path filter — long + thin
     ecg_paths = [d for d in drawings if (d["rect"].width > 200 and d["rect"].height < 50)]
-    logs.append(f"დაფილტრილი ECG path-ები: {len(ecg_paths)}")
+    logs.append(f"ECG path-ების რაოდენობა: {len(ecg_paths)}")
 
     if not ecg_paths:
-        logs.append("ECG path-ები ვერ მოიძებნა — შეამოწმე PDF ტიპი ან ზომები.")
+        logs.append("⚠️ ECG path ვერ მოიძებნა — შეამოწმე PDF ფორმატი.")
         return []
 
-    # დავაჯგუფოთ ჰორიზონტალური მდებარეობით
+    # Group by Y proximity
     ecg_paths.sort(key=lambda d: d["rect"].y0)
     groups = []
-    threshold = 40  # pixel-based tolerance
+    threshold = 25  # clustering sensitivity
     for d in ecg_paths:
-        y = (d["rect"].y0 + d["rect"].y1) / 2
-        if not groups or abs(y - groups[-1]["center"]) > threshold:
-            groups.append({"center": y, "items": [d]})
+        y_center = (d["rect"].y0 + d["rect"].y1) / 2
+        if not groups or abs(y_center - groups[-1]["center"]) > threshold:
+            groups.append({"center": y_center, "items": [d]})
         else:
             groups[-1]["items"].append(d)
 
-    logs.append(f"გაპოვნა {len(groups)} სავარაუდო ECG ზოლი (lead)")
+    logs.append(f"დაფიქსირდა {len(groups)} სავარაუდო ECG ზოლი")
 
     segment_urls = []
     for i, g in enumerate(groups):
         rects = [d["rect"] for d in g["items"]]
-        top = min(r.y0 for r in rects)
-        bottom = max(r.y1 for r in rects)
+        top = min(r.y0 for r in rects) - padding
+        bottom = max(r.y1 for r in rects) + padding
         left = min(r.x0 for r in rects)
         right = max(r.x1 for r in rects)
         clip = fitz.Rect(left, top, right, bottom)
@@ -123,18 +121,19 @@ def vector_segment_by_paths(input_pdf, output_dir, logs):
         new_pdf = fitz.open()
         new_page = new_pdf.new_page(width=clip.width, height=clip.height)
         new_page.show_pdf_page(new_page.rect, doc, 0, clip=clip)
-        out_path = os.path.join(output_dir, f"lead_{i+1}.pdf")
-        new_pdf.save(out_path, clean=True, deflate=True)
+        seg_path = os.path.join(out_dir, f"lead_{i+1}.pdf")
+        new_pdf.save(seg_path, clean=True, deflate=True)
         new_pdf.close()
 
-        rel_path = f"/segments/{os.path.basename(output_dir)}/lead_{i+1}.pdf"
+        rel_path = f"/segments/{os.path.basename(out_dir)}/lead_{i+1}.pdf"
         segment_urls.append(rel_path)
 
     doc.close()
-    logs.append(f"სეგმენტები შენახულია: {len(segment_urls)} ფაილი")
+    logs.append(f"✅ სეგმენტაცია დასრულდა ({len(segment_urls)} ფაილი)")
     return segment_urls
 
 
+# -------- FLASK ROUTES --------
 @app.route("/", methods=["GET", "POST"])
 def index():
     cleaned_pdf = None
@@ -149,18 +148,18 @@ def index():
             f.save(in_path)
             base_name = os.path.splitext(filename)[0]
 
-            # 1️⃣ Remove text (vector preserved)
+            # Step 1 — Clean text
             cleaned_name = f"{base_name}_no_text.pdf"
             cleaned_path = os.path.join(app.config["OUTPUT_FOLDER"], cleaned_name)
-            logs.append(f"ტექსტის მოშლა ფაილიდან: {filename}")
+            logs.append(f"📄 ტექსტის მოშლა: {filename}")
             remove_text_from_pdf(in_path, cleaned_path)
-            logs.append("გაწმენდა დასრულებულია.")
             cleaned_pdf = f"/outputs/{cleaned_name}"
+            logs.append("🧹 ტექსტისგან გასუფთავება დასრულებულია.")
 
-            # 2️⃣ Segment by vector paths
-            logs.append("ECG სეგმენტაცია ვექტორული path-ების მიხედვით...")
+            # Step 2 — Adaptive vector segmentation
+            logs.append("📈 ECG სეგმენტაცია მიმდინარეობს (ადაპტური)...")
             seg_dir = os.path.join(app.config["SEGMENT_FOLDER"], base_name)
-            segments = vector_segment_by_paths(cleaned_path, seg_dir, logs)
+            segments = adaptive_vector_segmentation(cleaned_path, seg_dir, logs)
 
     return render_template_string(HTML_TEMPLATE, cleaned_pdf=cleaned_pdf, segments=segments, logs="\n".join(logs))
 
