@@ -1,117 +1,136 @@
 # app.py
-
-import os
-import subprocess
-import glob
-import json
-import xml.etree.ElementTree as ET
-import uuid
-import shutil
-import io
+import io, json, re
 from flask import Flask, render_template, request, send_file
+import fitz  # PyMuPDF
+import xml.etree.ElementTree as ET
 from svg.path import parse_path
 
 app = Flask(__name__)
-TEMP_DIR = "temp_files"
 
-# დამხმარე ფუნქციები PDF-ის კონვერტაციისთვის და კოორდინატების ამოღებისთვის
-def convert_pdf_to_svg(pdf_path, temp_request_dir):
-    output_basename = os.path.splitext(os.path.basename(pdf_path))[0]
-    output_prefix = os.path.join(temp_request_dir, output_basename)
-    command = ['pdftocairo', '-svg', pdf_path, output_prefix]
-    
+def _sample_path_coords(d_attr: str, samples_per_seg: int = 50, max_points: int = 50000):
+    """Sample coordinates along an SVG path 'd' attribute."""
     try:
-        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        return glob.glob(f'{output_prefix}*.svg')
-    except Exception as e:
-        print(f"Error during PDF to SVG conversion: {e}")
+        path = parse_path(d_attr)
+    except Exception:
         return []
 
-def extract_coordinates_from_svg(svg_path):
-    try:
-        tree = ET.parse(svg_path)
-        root = tree.getroot()
-        namespace = '{http://www.w3.org/2000/svg}'
-        all_paths = root.findall(f".//{namespace}path")
-        
-        if not all_paths: return None
-        
-        longest_path_element = max(all_paths, key=lambda p: len(p.get('d', '')))
-        d_attribute = longest_path_element.get('d')
-        path_data = parse_path(d_attribute)
-        
-        return [[seg.end.real, seg.end.imag] for seg in path_data]
-    except Exception as e:
-        print(f"Error during SVG coordinate extraction: {e}")
-        return None
+    coords = []
+    for seg in path:
+        n = max(2, samples_per_seg)
+        for i in range(n):
+            t = i / (n - 1)
+            pt = seg.point(t)
+            coords.append([float(pt.real), float(pt.imag)])
+            if len(coords) >= max_points:
+                return coords
+    return coords
 
-# მთავარი გვერდის მარშრუტი
-@app.route('/')
+def _poly_points_to_coords(points_attr: str):
+    """Convert 'points' attribute of <polyline>/<polygon> to list of [x,y]."""
+    nums = [float(x) for x in re.split(r"[,\s]+", points_attr.strip()) if x]
+    return [[nums[i], nums[i+1]] for i in range(0, len(nums) - 1, 2)]
+
+def extract_coords_from_svg_text(svg_text: str, samples_per_seg: int = 50):
+    """Parse SVG string and return combined coordinates + breakdown by element."""
+    root = ET.fromstring(svg_text)
+    ns = {"svg": "http://www.w3.org/2000/svg"}
+    paths = root.findall(".//svg:path", ns)
+    polylines = root.findall(".//svg:polyline", ns)
+    lines = root.findall(".//svg:line", ns)
+
+    by_element = []
+
+    # <path>
+    for p in paths:
+        d = p.get("d")
+        if not d:
+            continue
+        pts = _sample_path_coords(d, samples_per_seg=samples_per_seg)
+        if pts:
+            by_element.append({"type": "path", "count": len(pts), "coords": pts})
+
+    # <polyline>
+    for pl in polylines:
+        pts_attr = pl.get("points")
+        if not pts_attr:
+            continue
+        pts = _poly_points_to_coords(pts_attr)
+        if pts:
+            by_element.append({"type": "polyline", "count": len(pts), "coords": pts})
+
+    # <line>
+    for ln in lines:
+        try:
+            x1 = float(ln.get("x1", "0")); y1 = float(ln.get("y1", "0"))
+            x2 = float(ln.get("x2", "0")); y2 = float(ln.get("y2", "0"))
+            by_element.append({"type": "line", "count": 2, "coords": [[x1, y1], [x2, y2]]})
+        except Exception:
+            continue
+
+    # flatten
+    flat = []
+    for item in by_element:
+        flat.extend(item["coords"])
+
+    return {
+        "num_elements": len(by_element),
+        "elements": by_element,       # detail per element
+        "total_points": len(flat),
+        "coordinates": flat           # flattened coordinates (backward compatible)
+    }
+
+@app.route("/")
 def index():
-    return render_template('index.html')
+    return render_template("index.html")
 
-# ფაილის ატვირთვის და დამუშავების მარშრუტი
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    if 'pdf_file' not in request.files:
+@app.route("/upload", methods=["POST"])
+def upload():
+    if "pdf_file" not in request.files:
         return "No file part", 400
-    
-    file = request.files['pdf_file']
-    if file.filename == '' or not file.filename.lower().endswith('.pdf'):
+    f = request.files["pdf_file"]
+    if not f.filename.lower().endswith(".pdf"):
         return "Invalid file selected", 400
 
-    # ვქმნით უნიკალურ დროებით საქაღალდეს თითოეული მოთხოვნისთვის
-    request_id = str(uuid.uuid4())
-    temp_request_dir = os.path.join(TEMP_DIR, request_id)
-    os.makedirs(temp_request_dir, exist_ok=True)
+    # Read PDF bytes in-memory (no temp files, works great on Render)
+    pdf_bytes = f.read()
 
+    # Open with PyMuPDF and export first page to SVG (no Poppler needed)
     try:
-        pdf_path = os.path.join(temp_request_dir, file.filename)
-        file.save(pdf_path)
-
-        # ეტაპი 1: PDF -> SVG
-        svg_files = convert_pdf_to_svg(pdf_path, temp_request_dir)
-        if not svg_files:
-            return "Failed to convert PDF to SVG. Is Poppler installed correctly on the server?", 500
-
-        # ვიღებთ მხოლოდ პირველი გვერდის SVG-ს
-        svg_to_process = svg_files[0]
-        
-        # ეტაპი 2: SVG -> Coordinates
-        coords = extract_coordinates_from_svg(svg_to_process)
-        if not coords:
-            return "Could not find ECG coordinates in the generated SVG.", 500
-        
-        # ვამზადებთ JSON მონაცემებს
-        output_data = {
-            "source_pdf": file.filename,
-            "processed_svg": os.path.basename(svg_to_process),
-            "point_count": len(coords),
-            "coordinates": coords
-        }
-
-        # ვქმნით ფაილს მეხსიერებაში და ვაბრუნებთ გადმოსაწერად
-        mem_file = io.BytesIO()
-        mem_file.write(json.dumps(output_data, indent=4).encode('utf-8'))
-        mem_file.seek(0)
-
-        json_filename = f"{os.path.splitext(file.filename)[0]}_coords.json"
-        
-        return send_file(
-            mem_file,
-            as_attachment=True,
-            download_name=json_filename,
-            mimetype='application/json'
-        )
-
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        if doc.page_count == 0:
+            return "Empty PDF", 400
+        page = doc[0]  # first page; extend to loop pages if you like
+        svg_text = page.get_svg_image()  # SVG markup as string
+    except Exception as e:
+        return f"Failed to read PDF: {e}", 500
     finally:
-        # აუცილებლად ვშლით დროებით საქაღალდეს და მის შიგთავსს
-        if os.path.exists(temp_request_dir):
-            shutil.rmtree(temp_request_dir)
+        try:
+            doc.close()
+        except Exception:
+            pass
 
-if __name__ == '__main__':
-    # ვქმნით მთავარ დროებით საქაღალდეს, თუ არ არსებობს
-    if not os.path.exists(TEMP_DIR):
-        os.makedirs(TEMP_DIR)
-    # ლოკალურ კომპიუტერზე გასაშვებად
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Parse SVG and extract ECG-like vectors
+    try:
+        result = extract_coords_from_svg_text(svg_text, samples_per_seg=50)
+    except Exception as e:
+        return f"Failed to parse SVG: {e}", 500
+
+    output = {
+        "source_pdf": f.filename,
+        "method": "pymupdf_get_svg_image",
+        "page": 1,
+        "num_elements": result["num_elements"],
+        "point_count": result["total_points"],
+        "coordinates": result["coordinates"],  # flattened for compatibility
+        "elements": result["elements"]         # detailed breakdown
+    }
+
+    mem = io.BytesIO()
+    mem.write(json.dumps(output, ensure_ascii=False, indent=2).encode("utf-8"))
+    mem.seek(0)
+    json_name = f"{f.filename.rsplit('.',1)[0]}_coords.json"
+
+    return send_file(mem, as_attachment=True, download_name=json_name, mimetype="application/json")
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
