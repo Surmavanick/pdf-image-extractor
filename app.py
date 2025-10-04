@@ -29,6 +29,7 @@ HTML_TEMPLATE = """
     body { font-family: sans-serif; padding: 24px; max-width: 900px; margin: auto; }
     .btn { padding: 8px 14px; border: 1px solid #ddd; background: #f7f7f7; cursor: pointer; border-radius: 8px; }
     .card { border: 1px solid #eee; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    .logs { background: #f0f0f0; border: 1px solid #ddd; padding: 10px; border-radius: 8px; font-family: monospace; white-space: pre-wrap; margin-top: 16px; max-height: 200px; overflow-y: auto;}
   </style>
 </head>
 <body>
@@ -40,21 +41,28 @@ HTML_TEMPLATE = """
     </form>
   </div>
 
-  {% if cleaned_pdf %}
+  {% if result %}
     <div class="card">
       <h3>🧹 გაწმენდილი PDF</h3>
-      <p><a href="{{ cleaned_pdf }}" download>ჩამოტვირთე ტექსტის გარეშე PDF</a></p>
+      <p><a href="{{ result.cleaned_pdf_url }}" download>ჩამოტვირთე ტექსტის გარეშე PDF</a></p>
     </div>
   {% endif %}
 
-  {% if segments %}
+  {% if result and result.segments %}
     <div class="card">
       <h3>📈 სეგმენტირებული არხები (PDF)</h3>
       <ul>
-        {% for seg in segments %}
+        {% for seg in result.segments %}
           <li><a href="{{ seg.url }}" download>{{ seg.name }}</a></li>
         {% endfor %}
       </ul>
+    </div>
+  {% endif %}
+  
+  {% if result and result.logs %}
+    <div class="card">
+        <h3>სამუშაო პროცესის ლოგი (Logs)</h3>
+        <div class="logs">{{ result.logs }}</div>
     </div>
   {% endif %}
 </body>
@@ -67,52 +75,49 @@ def remove_text_from_pdf(input_pdf, output_pdf):
     """Removes all text from a PDF by applying redactions."""
     doc = fitz.open(input_pdf)
     for page in doc:
-        # ვიყენებთ get_text("words")-ს, რომელიც სტაბილურად მუშაობს
         words = page.get_text("words")
         for word in words:
             rect = fitz.Rect(word[:4])
             page.add_redact_annot(rect)
-        
-        # ვშლით მონიშნულ ტექსტს
         page.apply_redactions()
-    
-    # ვინახავთ გასუფთავებულ ფაილს
     doc.save(output_pdf, garbage=4, deflate=True, clean=True)
     doc.close()
 
-
 def segment_vector_ecg_by_extraction(input_pdf, output_dir):
     """
-    Splits the ECG into segments by extracting vector paths based on their color and position.
+    Splits the ECG by extracting dark-colored vector paths.
     """
+    logs = []
     os.makedirs(output_dir, exist_ok=True)
     
-    TARGET_COLOR = (0, 0, 0) 
-    COLOR_TOLERANCE = 0.1
+    # ზღვარი, რომლის ქვემოთაც ფერი ითვლება "მუქად"
+    # R+G+B ჯამი. თეთრი = 3.0, შავი = 0.0.
+    DARKNESS_THRESHOLD = 2.0 
+    logs.append(f"სეგმენტაციის დაწყება: ვეძებთ მუქ ხაზებს (R+G+B < {DARKNESS_THRESHOLD})")
     
     doc = fitz.open(input_pdf)
     if not doc or doc.page_count == 0:
-        return []
+        logs.append("შეცდომა: გასუფთავებული PDF ფაილი ცარიელია ან ვერ გაიხსნა.")
+        return [], "\n".join(logs)
     page = doc[0]
     
     drawings = page.get_drawings()
+    logs.append(f"გასუფთავებულ PDF-ში ნაპოვნია {len(drawings)} ვექტორული ობიექტი.")
+    
     ecg_paths = []
     for path in drawings:
-        # ვამოწმებთ, რომ ობიექტს აქვს ფერი და არის ხაზი
         if path.get("stroke_color") and path.get("type") == "s":
             color = path["stroke_color"]
-            if (abs(color[0] - TARGET_COLOR[0]) < COLOR_TOLERANCE and
-                abs(color[1] - TARGET_COLOR[1]) < COLOR_TOLERANCE and
-                abs(color[2] - TARGET_COLOR[2]) < COLOR_TOLERANCE):
+            if sum(color) < DARKNESS_THRESHOLD:
                 y_coords = [p.y for item in path["items"] for p in item[1:] if isinstance(p, fitz.Point)]
                 if y_coords:
                     avg_y = sum(y_coords) / len(y_coords)
-                    ecg_paths.append({"path": path, "avg_y": avg_y})
+                    ecg_paths.append({"path": path, "avg_y": avg_y, "color": color})
 
+    logs.append(f"ნაპოვნია {len(ecg_paths)} მუქი ფერის ხაზის სეგმენტი.")
     if not ecg_paths:
-        print("ეკგ ხაზები ვერ მოიძებნა ფერის მიხედვით.")
         doc.close()
-        return []
+        return [], "\n".join(logs)
 
     ecg_paths.sort(key=lambda p: p["avg_y"])
     
@@ -120,13 +125,14 @@ def segment_vector_ecg_by_extraction(input_pdf, output_dir):
     if ecg_paths:
         current_group = [ecg_paths[0]]
         for i in range(1, len(ecg_paths)):
-            # თუ ორ ხაზს შორის ვერტიკალური დაშორება დიდია, ეს ახალი ჯგუფია
-            if ecg_paths[i]["avg_y"] - current_group[-1]["avg_y"] > 20: 
+            if ecg_paths[i]["avg_y"] - ecg_paths[i-1]["avg_y"] > 20: 
                 groups.append(current_group)
                 current_group = []
             current_group.append(ecg_paths[i])
         groups.append(current_group)
-
+    
+    logs.append(f"მუქი ხაზები დაჯგუფდა {len(groups)} სექტორად.")
+    
     segment_files_info = []
     leads = ["I", "II", "III", "aVR", "aVL", "aVF", "V1", "V2", "V3", "V4", "V5", "V6", "Rhythm_Strip"]
     
@@ -134,17 +140,17 @@ def segment_vector_ecg_by_extraction(input_pdf, output_dir):
         if i >= len(leads): break
         lead_name = leads[i]
         
+        # ვიპოვოთ ამ ჯგუფის დომინანტი ფერი, რომ იმ ფერით დავხატოთ
+        group_colors = [p['color'] for p in group]
+        dominant_color = max(set(group_colors), key=group_colors.count) if group_colors else (0,0,0)
+
         all_points = [p for p_info in group for item in p_info["path"]["items"] for p in item[1:] if isinstance(p, fitz.Point)]
         if not all_points: continue
 
-        min_x = min(p.x for p in all_points)
-        max_x = max(p.x for p in all_points)
-        min_y = min(p.y for p in all_points)
-        max_y = max(p.y for p in all_points)
-
+        min_x, max_x = min(p.x for p in all_points), max(p.x for p in all_points)
+        min_y, max_y = min(p.y for p in all_points), max(p.y for p in all_points)
         padding = 10
-        width = (max_x - min_x) + 2 * padding
-        height = (max_y - min_y) + 2 * padding
+        width, height = (max_x - min_x) + 2 * padding, (max_y - min_y) + 2 * padding
         
         new_pdf = fitz.open()
         new_page = new_pdf.new_page(width=width, height=height)
@@ -153,63 +159,58 @@ def segment_vector_ecg_by_extraction(input_pdf, output_dir):
             for item in path_info["path"]["items"]:
                 offset = fitz.Point(min_x - padding, min_y - padding)
                 if item[0] == "l":
-                    new_page.draw_line(item[1] - offset, item[2] - offset, color=TARGET_COLOR)
+                    new_page.draw_line(item[1] - offset, item[2] - offset, color=dominant_color)
                 elif item[0] == "c":
-                    new_page.draw_bezier(item[1] - offset, item[2] - offset, item[3] - offset, item[4] - offset, color=TARGET_COLOR)
+                    new_page.draw_bezier(item[1] - offset, item[2] - offset, item[3] - offset, item[4] - offset, color=dominant_color)
 
         relative_path = os.path.join(os.path.basename(output_dir), f"{lead_name}.pdf")
         full_path = os.path.join(output_dir, f"{lead_name}.pdf")
         new_pdf.save(full_path)
         new_pdf.close()
         
-        segment_files_info.append({
-            "name": f"{lead_name}.pdf",
-            "url": f"/segments/{relative_path}"
-        })
+        segment_files_info.append({"name": f"{lead_name}.pdf", "url": f"/segments/{relative_path}"})
         
     doc.close()
-    return segment_files_info
+    logs.append(f"წარმატებით შეიქმნა {len(segment_files_info)} სეგმენტის ფაილი.")
+    return segment_files_info, "\n".join(logs)
 
 
 # --- ვებ-გვერდის ლოგიკა (Routes) ---
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    cleaned_pdf_url = None
-    segments_info = []
-
+    result_data = {}
     if request.method == "POST":
         file = request.files.get("pdf_file")
         if file and file.filename:
             filename = secure_filename(file.filename)
             filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
             file.save(filepath)
-
             base_no_ext = os.path.splitext(filename)[0]
             
-            # 1️⃣ ტექსტის გაწმენდა
+            # ნაბიჯი 1: ტექსტის მოშორება
             cleaned_pdf_name = f"{base_no_ext}_no_text.pdf"
             cleaned_pdf_path = os.path.join(app.config["OUTPUT_FOLDER"], cleaned_pdf_name)
             remove_text_from_pdf(filepath, cleaned_pdf_path)
-            cleaned_pdf_url = f"/outputs/{cleaned_pdf_name}"
+            
+            result_data['cleaned_pdf_url'] = f"/outputs/{cleaned_pdf_name}"
 
-            # 2️⃣ ვექტორული სეგმენტაცია
+            # ნაბიჯი 2: სეგმენტაცია გასუფთავებულ ფაილზე
             segment_output_dir = os.path.join(app.config["SEGMENT_FOLDER"], base_no_ext)
-            segments_info = segment_vector_ecg_by_extraction(cleaned_pdf_path, segment_output_dir)
+            segments, logs = segment_vector_ecg_by_extraction(cleaned_pdf_path, segment_output_dir)
+            
+            result_data['segments'] = segments
+            result_data['logs'] = logs
 
-    return render_template_string(HTML_TEMPLATE, cleaned_pdf=cleaned_pdf_url, segments=segments_info)
-
+    return render_template_string(HTML_TEMPLATE, result=result_data)
 
 @app.route("/outputs/<path:filename>")
 def download_output(filename):
-    """ფაილის გადმოწერა 'outputs' ფოლდერიდან."""
     return send_from_directory(app.config["OUTPUT_FOLDER"], filename, as_attachment=True)
     
 @app.route("/segments/<path:filename>")
 def download_segment(filename):
-    """სეგმენტის გადმოწერა 'segments' ქვედა ფოლდერიდან."""
     return send_from_directory(app.config["SEGMENT_FOLDER"], filename, as_attachment=True)
-
 
 # --- აპლიკაციის გაშვება ---
 if __name__ == "__main__":
