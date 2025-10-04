@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ECG PDF-დან კოორდინატების ამოღება</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>ატვირთეთ ECG PDF ფაილი</h1>
+        <p>სისტემა ავტომატურად გადაიყვანს PDF ფაილს SVG-ში, ამოიღებს ეკგ-ს ტალღის კოორდინატებს და მოგცემთ JSON ფაილის გადმოწერის საშუალებას.</p>
+        <form action="/upload" method="post" enctype="multipart/form-data">
+            <input type="file" name="pdf_file" accept=".pdf" required>
+            <button type="submit">დამუშავება და გადმოწერა</button>
+        </form>
+    </div>
+</body>
+</html>
