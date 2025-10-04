@@ -1,25 +1,28 @@
-# syntax=docker/dockerfile:1
-FROM python:3.11-slim
+# Dockerfile
 
-# System deps (fitz/PyMuPDF works fine with slim + basic build tools)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libjpeg62-turbo \
-    libopenjp2-7 \
-    libxcb1 \ 
-    && rm -rf /var/lib/apt/lists/*
+# ვიყენებთ Python-ის ოფიციალურ, მცირე ზომის ვერსიას
+FROM python:3.10-slim
 
+# ვუთითებთ სამუშაო საქაღალდეს კონტეინერის შიგნით
 WORKDIR /app
 
-# Install Python deps first (better caching)
-COPY requirements.txt ./
+# ვანახლებთ პაკეტების სიას და ვაყენებთ poppler-utils-ს.
+# ეს არის კრიტიკული ნაბიჯი PDF-ის კონვერტაციისთვის.
+RUN apt-get update && \
+    apt-get install -y poppler-utils && \
+    rm -rf /var/lib/apt/lists/*
+
+# ვაკოპირებთ დამოკიდებულებების ფაილს და ვაყენებთ მათ
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy app
+# ვაკოპირებთ პროექტის დანარჩენ ფაილებს
 COPY . .
 
-# Expose port for Render/containers
-ENV PORT=5000
-EXPOSE 5000
+# Render-ი დინამიურად გვაწვდის PORT ცვლადს. Gunicorn-ი ამ პორტზე გაეშვება.
+# EXPOSE ეუბნება Docker-ს, რომ კონტეინერი ამ პორტს უსმენს.
+EXPOSE 10000
 
-# Use gunicorn in Docker
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:5000"]
+# ბრძანება, რომელიც გაუშვებს აპლიკაციას Render-ზე
+# Gunicorn-ი უშვებს app ობიექტს app.py ფაილიდან
+CMD ["gunicorn", "--workers", "2", "--bind", "0.0.0.0:10000", "app:app"]
